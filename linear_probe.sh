@@ -1,0 +1,17 @@
+python main_finetune.py \
+    --batch_size 128 \
+    --epochs 200 \
+    --accum_iter 1 \
+    --input_size 224 \
+    --drop_path 0.1 \
+    --clip_grad 1.0 \
+    --weight_decay 0.05 \
+    --random_label_ratio 0.0 \
+    --output_dir ./mbzuai_results/linear_probing/cifar10_random_labels_scratch_gpt2_medium_tiny_imagenet_probe \
+    --log_dir ./results/log_dir \
+    --data_path /root/autodl-tmp/data/tiny-imagenet-200 \
+    --nb_classes 200 \
+    --dist_eval \
+    --linear_probe \
+    --dataset tiny-imagenet \
+    --gpt2_checkpoint /root/autodl-tmp/llm-generalization/mbzuai_results/pretrain/cifar10_pretrain_gpt2_medium_classifier_1.0_random_labels/checkpoint-349.pth \

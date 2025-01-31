@@ -1,0 +1,15 @@
+datasets==3.0.0
+numpy==2.1.1
+packaging==24.1
+pandas==2.2.3
+pillow==10.4.0
+timm==0.3.2
+tokenizers==0.19.1
+torch==2.4.1
+torchvision==0.19.1
+tqdm==4.66.5
+transformers==4.44.2
+triton==3.0.0
+yarl==1.11.1
+torch==2.4.1
+torchvision==0.19.1
