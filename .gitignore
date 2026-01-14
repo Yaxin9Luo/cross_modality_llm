@@ -33,3 +33,8 @@ ENV/
 .Trashes
 ehthumbs.db
 Thumbs.db
+/scripts
+/linprobe_comparison_results
+/data
+*.imagenet_cache/
+*.imagenet_cache/*

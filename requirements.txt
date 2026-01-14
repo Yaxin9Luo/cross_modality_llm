@@ -1,15 +1,42 @@
-datasets==3.0.0
-numpy==2.1.1
-packaging==24.1
-pandas==2.2.3
-pillow==10.4.0
-timm==0.3.2
-tokenizers==0.19.1
-torch==2.4.1
-torchvision==0.19.1
-tqdm==4.66.5
-transformers==4.44.2
-triton==3.0.0
-yarl==1.11.1
-torch==2.4.1
-torchvision==0.19.1
+# Cross-Modality LLM Dependencies
+# ================================
+# NOTE: For uv users, prefer using pyproject.toml:
+#   uv sync
+#   uv sync --extra wandb  # with W&B support
+#
+# For pip users:
+#   pip install -r requirements.txt
+
+# Core Deep Learning
+torch>=2.4.0
+torchvision>=0.19.0
+triton>=3.0.0
+
+# Transformers & Vision Models
+transformers>=4.44.0
+timm==0.3.2  # STRICT: Required by MAE codebase (version check enforced)
+tokenizers>=0.19.0
+
+# Data Processing
+numpy>=2.1.0
+pandas>=2.2.0
+pillow>=10.4.0
+datasets>=3.0.0
+
+# Scientific Computing
+scipy>=1.14.0
+scikit-learn>=1.5.0
+
+# Visualization
+matplotlib>=3.9.0
+seaborn>=0.13.0
+
+# Progress & Utilities
+tqdm>=4.66.0
+packaging>=24.0
+
+# Experiment Tracking
+tensorboard>=2.17.0
+
+# Optional: Weights & Biases (uncomment if needed)
+# wandb>=0.17.0
