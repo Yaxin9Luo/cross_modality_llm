@@ -53,7 +53,7 @@ def get_args_parser():
     # Model parameters
     parser.add_argument('--model', default='qwen3-8b', type=str, metavar='MODEL',
                         help='Name of model to train')
-    parser.add_argument('--pretrained_model_path', type=str, default='ckpts/Qwen3-8B',
+    parser.add_argument('--pretrained_model_path', type=str, default='./Qwen3-8B',
                         help='Path to pretrained Qwen3-8B checkpoint')
     parser.add_argument('--random_init', action='store_true',
                         help='Use random initialization instead of pretrained weights')

@@ -5,7 +5,6 @@
 /wandb/
 /model_parameters/
 # Ignore markdown files
-*.md
 *.png
 *.pdf
 *.csv
@@ -33,9 +32,9 @@ ENV/
 .Trashes
 ehthumbs.db
 Thumbs.db
-/scripts
 /linprobe_comparison_results
 /data
 *.imagenet_cache/
 *.imagenet_cache/*
 ckpts/
+Qwen3-8B/

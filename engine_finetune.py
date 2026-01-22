@@ -12,10 +12,15 @@
 import math
 import sys
 from typing import Iterable, Optional
-import torch.nn.functional as F  
+import torch.nn.functional as F
 
 import torch
-import wandb
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+    wandb = None
 from timm.data import Mixup
 from timm.utils import accuracy
 from collections import defaultdict
