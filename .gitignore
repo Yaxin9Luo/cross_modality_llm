@@ -38,3 +38,4 @@ Thumbs.db
 /data
 *.imagenet_cache/
 *.imagenet_cache/*
+ckpts/

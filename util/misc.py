@@ -276,6 +276,33 @@ class NativeScalerWithGradNormCount:
         self._scaler.load_state_dict(state_dict)
 
 
+class NoOpScaler:
+    """No-op scaler for bfloat16 training (GradScaler doesn't support bfloat16)"""
+    state_dict_key = "amp_scaler"
+
+    def __init__(self):
+        pass
+
+    def __call__(self, loss, optimizer, clip_grad=None, parameters=None, create_graph=False, update_grad=True):
+        loss.backward(create_graph=create_graph)
+        if update_grad:
+            if clip_grad is not None:
+                assert parameters is not None
+                norm = torch.nn.utils.clip_grad_norm_(parameters, clip_grad)
+            else:
+                norm = get_grad_norm_(parameters) if parameters is not None else None
+            optimizer.step()
+        else:
+            norm = None
+        return norm
+
+    def state_dict(self):
+        return {}
+
+    def load_state_dict(self, state_dict):
+        pass
+
+
 def get_grad_norm_(parameters, norm_type: float = 2.0) -> torch.Tensor:
     if isinstance(parameters, torch.Tensor):
         parameters = [parameters]
