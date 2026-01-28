@@ -164,6 +164,13 @@ def get_args_parser():
                         help='Only train the classifier layer (linear probing)')
     parser.add_argument('--qwen_checkpoint', type=str, default='',
                         help='Path to fine-tuned Qwen3 checkpoint (for resuming training)')
+
+    # DeepSpeed parameters
+    parser.add_argument('--deepspeed', action='store_true',
+                        help='Enable DeepSpeed training (ZeRO-2/ZeRO-3 optimization)')
+    parser.add_argument('--deepspeed_config', type=str, default='deepspeed_configs/zero2_config.json',
+                        help='Path to DeepSpeed configuration file')
+
     # Dataset selection parameter
     parser.add_argument('--dataset', type=str, default='cifar10', choices=['cifar10', 'cifar100', 'imagenet', 'tiny-imagenet'],
                         help='Dataset to use for training')
@@ -622,8 +629,8 @@ def main(args):
                 model.load_state_dict(state_dict, strict=False)
 
             print("Successfully loaded weights from checkpoint")
-    model.to(device)
 
+    # Calculate effective batch size and learning rate before DeepSpeed init
     model_without_ddp = model
     total_parameters = sum(p.numel() for p in model.parameters())
     trainable_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -633,7 +640,7 @@ def main(args):
     print('number of trainable params (M): %.2f' % (trainable_parameters / 1.e6))
 
     eff_batch_size = args.batch_size * args.accum_iter * misc.get_world_size()
-    
+
     if args.lr is None:  # only base_lr is specified
         args.lr = args.blr * eff_batch_size / 256
 
@@ -643,18 +650,78 @@ def main(args):
     print("accumulate grad iterations: %d" % args.accum_iter)
     print("effective batch size: %d" % eff_batch_size)
 
-    if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, 
-                                                        device_ids=[args.gpu],
-                                                        find_unused_parameters=True)
-        model_without_ddp = model.module
-    
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs) ##### Add scheduler
+    # Initialize DeepSpeed or standard DDP
+    if args.deepspeed:
+        import deepspeed
+        import json
 
-    # Use NoOpScaler for bfloat16 (GradScaler doesn't support bfloat16)
-    loss_scaler = NoOpScaler()
-    print("Using NoOpScaler for bfloat16 training (no gradient scaling)")
+        print(f"Initializing DeepSpeed with config: {args.deepspeed_config}")
+
+        # Load DeepSpeed config
+        with open(args.deepspeed_config, 'r') as f:
+            ds_config = json.load(f)
+
+        # Update DeepSpeed config with runtime parameters
+        ds_config['train_batch_size'] = eff_batch_size
+        ds_config['train_micro_batch_size_per_gpu'] = args.batch_size
+        ds_config['gradient_accumulation_steps'] = args.accum_iter
+
+        # Set gradient clipping if specified
+        if args.clip_grad is not None:
+            ds_config['gradient_clipping'] = args.clip_grad
+
+        # Create optimizer and scheduler manually to avoid FusedAdam compilation
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=args.lr,
+            betas=(0.9, 0.95),
+            eps=1e-8,
+            weight_decay=args.weight_decay
+        )
+
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=args.epochs
+        )
+
+        # Initialize DeepSpeed engine with our optimizer
+        model_engine, optimizer, _, lr_scheduler = deepspeed.initialize(
+            model=model,
+            optimizer=optimizer,
+            lr_scheduler=scheduler,
+            config=ds_config
+        )
+
+        # Use the DeepSpeed engine
+        model = model_engine
+        scheduler = lr_scheduler
+
+        model_without_ddp = model.module
+        loss_scaler = None  # DeepSpeed handles gradient scaling
+        print("DeepSpeed initialization complete")
+        print(f"  - ZeRO stage: {ds_config['zero_optimization']['stage']}")
+        print(f"  - Offload optimizer: {'offload_optimizer' in ds_config['zero_optimization']}")
+
+    else:
+        # Standard PyTorch DDP
+        model.to(device)
+
+        if args.distributed:
+            model = torch.nn.parallel.DistributedDataParallel(model,
+                                                            device_ids=[args.gpu],
+                                                            find_unused_parameters=True)
+            # Enable static graph for compatibility with gradient checkpointing
+            # This fixes "Expected to mark a variable ready only once" error
+            if args.gradient_checkpointing:
+                model._set_static_graph()
+            model_without_ddp = model.module
+
+        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+
+        # Use NoOpScaler for bfloat16 (GradScaler doesn't support bfloat16)
+        loss_scaler = NoOpScaler()
+        print("Using NoOpScaler for bfloat16 training (no gradient scaling)")
 
     if mixup_fn is not None:
         # smoothing is handled with mixup label transform
@@ -666,15 +733,24 @@ def main(args):
 
     print("criterion = %s" % str(criterion))
 
-    misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
+    # Load checkpoint if resuming
     if args.resume:
         print(f"Resuming from checkpoint: {args.resume}")
-        checkpoint = torch.load(args.resume, map_location='cpu')
-        model_without_ddp.load_state_dict(checkpoint['model'])
-        optimizer.load_state_dict(checkpoint['optimizer'])
-        loss_scaler.load_state_dict(checkpoint['scaler'])
-        args.start_epoch = checkpoint['epoch'] + 1
-        print(f"Resumed from epoch {args.start_epoch}")
+        if args.deepspeed:
+            # DeepSpeed checkpoint loading
+            _, client_state = model.load_checkpoint(args.output_dir, tag=args.resume)
+            if client_state is not None:
+                args.start_epoch = client_state.get('epoch', 0) + 1
+                print(f"Resumed from epoch {args.start_epoch}")
+        else:
+            # Standard PyTorch checkpoint loading
+            checkpoint = torch.load(args.resume, map_location='cpu')
+            model_without_ddp.load_state_dict(checkpoint['model'])
+            optimizer.load_state_dict(checkpoint['optimizer'])
+            if loss_scaler is not None:
+                loss_scaler.load_state_dict(checkpoint['scaler'])
+            args.start_epoch = checkpoint['epoch'] + 1
+            print(f"Resumed from epoch {args.start_epoch}")
     if args.eval:
         test_stats = evaluate(data_loader_val, model, device)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
@@ -693,11 +769,26 @@ def main(args):
             log_writer=log_writer,
             args=args
         )
-        scheduler.step() ##### Add scheduler
-        if args.output_dir and (epoch + 1) % 10 == 0:
-            misc.save_model(
-                args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
-                loss_scaler=loss_scaler, epoch=epoch)
+        # Step scheduler (DeepSpeed manages its own scheduler internally)
+        if not args.deepspeed and scheduler is not None:
+            scheduler.step()
+
+        # Save checkpoint every 10 epochs
+        if args.output_dir and (epoch + 1) % 20 == 0:
+            if args.deepspeed:
+                # DeepSpeed checkpoint saving
+                client_state = {'epoch': epoch}
+                model.save_checkpoint(
+                    save_dir=args.output_dir,
+                    tag=f"checkpoint-{epoch}",
+                    client_state=client_state
+                )
+            else:
+                # Standard PyTorch checkpoint saving
+                misc.save_model(
+                    args=args, model=model, model_without_ddp=model_without_ddp,
+                    optimizer=optimizer, loss_scaler=loss_scaler, epoch=epoch
+                )
 
         test_stats = evaluate(data_loader_val, model, device)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
@@ -720,6 +811,21 @@ def main(args):
                 log_writer.flush()
             with open(os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
                 f.write(json.dumps(log_stats) + "\n")
+
+    # Save final checkpoint
+    if args.output_dir:
+        if args.deepspeed:
+            client_state = {'epoch': args.epochs - 1}
+            model.save_checkpoint(
+                save_dir=args.output_dir,
+                tag="checkpoint-final",
+                client_state=client_state
+            )
+        else:
+            misc.save_model(
+                args=args, model=model, model_without_ddp=model_without_ddp,
+                optimizer=optimizer, loss_scaler=loss_scaler, epoch=args.epochs - 1
+            )
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))

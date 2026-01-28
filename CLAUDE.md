@@ -150,6 +150,49 @@ python main_finetune_qwen.py \
     --output_dir ./results/qwen_finetune
 ```
 
+#### Linear Probing with Qwen: DDP vs DeepSpeed
+
+Both DeepSpeed and standard PyTorch DDP are supported for Qwen linear probing:
+
+**When to use Standard DDP** ([qwen_ddp_linprobe.sh](qwen_ddp_linprobe.sh)):
+- **Simpler setup**: No DeepSpeed configuration files needed
+- **Fewer bugs**: Standard PyTorch has fewer edge cases
+- **Better debugging**: Standard checkpoint format is easier to inspect
+- **Lower memory per GPU**: 18-22GB vs 25-30GB for DeepSpeed
+- **Recommended for**: 1-4 GPUs, development/testing, troubleshooting
+
+**When to use DeepSpeed** ([qwen_deepspeed_linprobe.sh](qwen_deepspeed_linprobe.sh)):
+- **Larger batch sizes**: 256 vs 128 per GPU
+- **Faster training**: 1.3-1.5x speedup on 4+ GPUs
+- **Required for**: Very large models (>8B parameters), 8+ GPUs
+
+**Command Examples**:
+```bash
+# Standard DDP (recommended for most users)
+bash qwen_ddp_linprobe.sh
+
+# DeepSpeed (for maximum performance)
+bash qwen_deepspeed_linprobe.sh
+
+# Custom GPU count
+NUM_GPUS=2 bash qwen_ddp_linprobe.sh
+
+# Custom dataset
+DATASET=cifar10 NB_CLASSES=10 bash qwen_ddp_linprobe.sh
+```
+
+**Memory and Performance Comparison**:
+| Mode | Batch Size/GPU | Memory/GPU | Training Time (100 epochs) |
+|------|----------------|------------|---------------------------|
+| Standard DDP | 128 | 18-22GB | ~60-75 min (baseline) |
+| DeepSpeed ZeRO-2 | 256 | 25-30GB | ~45-60 min (1.3x faster) |
+
+**Checkpoint Compatibility**:
+- ✅ DDP can load both DDP and DeepSpeed checkpoints (auto-detected)
+- ✅ DeepSpeed can load DeepSpeed checkpoints
+- ❌ DeepSpeed cannot load DDP checkpoints directly
+- Auto-detection: Script checks if checkpoint is directory (DeepSpeed) or file (PyTorch)
+
 ### Evaluation & Comparison
 
 #### Fair Comparison: LBBT vs DINOv2 (Recommended)

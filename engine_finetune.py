@@ -121,9 +121,14 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             wandb.log(grad_stats, step=epoch * len(data_loader) + step)
     for data_iter_step, (samples, targets) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
 
+        # Check if using DeepSpeed
+        is_deepspeed = hasattr(model, 'backward') and hasattr(model, 'step')
+
         # we use a per iteration (instead of per epoch) lr scheduler
+        # Skip for DeepSpeed if using internal scheduler
         if data_iter_step % accum_iter == 0:
-            lr_sched.adjust_learning_rate(optimizer, data_iter_step / len(data_loader) + epoch, args)
+            if not is_deepspeed or not hasattr(args, 'deepspeed_config'):
+                lr_sched.adjust_learning_rate(optimizer, data_iter_step / len(data_loader) + epoch, args)
 
         samples = samples.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
@@ -131,27 +136,49 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         if mixup_fn is not None:
             samples, targets = mixup_fn(samples, targets)
 
-        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+        if is_deepspeed:
+            # DeepSpeed training step with bfloat16
+            # Convert inputs to bfloat16 to match model dtype
+            samples = samples.to(torch.bfloat16)
+
             outputs = model(samples)
             loss = criterion(outputs, targets)
 
-        loss_value = loss.item()
+            loss_value = loss.item()
 
-        if not math.isfinite(loss_value):
-            print("Loss is {}, stopping training".format(loss_value))
-            sys.exit(1)
-        acc1, _ = accuracy(outputs, targets, topk=(1, 5))
-        metric_logger.update(acc1=acc1.item())
+            if not math.isfinite(loss_value):
+                print("Loss is {}, stopping training".format(loss_value))
+                sys.exit(1)
+            acc1, _ = accuracy(outputs, targets, topk=(1, 5))
+            metric_logger.update(acc1=acc1.item())
 
-        loss /= accum_iter
-        loss_scaler(loss, optimizer, clip_grad=max_norm,
-                    parameters=model.parameters(), create_graph=False,
-                    update_grad=(data_iter_step + 1) % accum_iter == 0)
-        if (data_iter_step + 1) % accum_iter == 0:
-            # log_block_gradients(data_iter_step)
-            optimizer.zero_grad()
+            # DeepSpeed handles backward and optimizer step
+            model.backward(loss)
+            model.step()
 
-        torch.cuda.synchronize()
+        else:
+            # Standard PyTorch DDP training step
+            with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                outputs = model(samples)
+                loss = criterion(outputs, targets)
+
+            loss_value = loss.item()
+
+            if not math.isfinite(loss_value):
+                print("Loss is {}, stopping training".format(loss_value))
+                sys.exit(1)
+            acc1, _ = accuracy(outputs, targets, topk=(1, 5))
+            metric_logger.update(acc1=acc1.item())
+
+            loss /= accum_iter
+            loss_scaler(loss, optimizer, clip_grad=max_norm,
+                        parameters=model.parameters(), create_graph=False,
+                        update_grad=(data_iter_step + 1) % accum_iter == 0)
+            if (data_iter_step + 1) % accum_iter == 0:
+                # log_block_gradients(data_iter_step)
+                optimizer.zero_grad()
+
+            torch.cuda.synchronize()
 
         metric_logger.update(loss=loss_value)
         min_lr = 10.
@@ -207,7 +234,7 @@ def evaluate(data_loader, model, device):
         target = target.to(device, non_blocking=True)
 
         # compute output
-        with torch.cuda.amp.autocast():
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
             output = model(images)
             loss = criterion(output, target)
 

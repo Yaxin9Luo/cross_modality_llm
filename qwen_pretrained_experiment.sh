@@ -8,6 +8,8 @@
 #
 # Pretrained weights loaded from: /workspace/cross_modality_llm/ckpts
 # All experiments use seed=42 for reproducibility
+#
+# Distributed Training: Uses 2 GPUs via torchrun
 # ============================================================
 
 set -e  # Exit on error
@@ -17,12 +19,16 @@ SEED=42
 PRETRAINED_PATH="/workspace/cross_modality_llm/Qwen3-8B"
 DATA_PATH="${DATA_PATH:-./data}"
 OUTPUT_BASE="${OUTPUT_BASE:-./results/qwen_pretrained}"
-DATASET="cifar10"
-NB_CLASSES=10
-BATCH_SIZE=32
+DATASET="cifar100"
+NB_CLASSES=100
+BATCH_SIZE=8
 ACCUM_ITER=2
 EPOCHS_FINETUNE=100
 EPOCHS_LINPROBE=100
+
+# Distributed training configuration
+NUM_GPUS="${NUM_GPUS:-2}"
+MASTER_PORT="${MASTER_PORT:-29500}"
 
 echo "============================================================"
 echo "Qwen3-8B Pretrained Weights Experiment"
@@ -31,6 +37,7 @@ echo "Pretrained Model Path: $PRETRAINED_PATH"
 echo "Dataset: $DATASET (${NB_CLASSES} classes)"
 echo "Data Path: $DATA_PATH"
 echo "Output Base: $OUTPUT_BASE"
+echo "Distributed Training: ${NUM_GPUS} GPUs (Master Port: $MASTER_PORT)"
 echo "============================================================"
 
 # Verify pretrained model path exists
@@ -56,7 +63,8 @@ echo "Loading pretrained weights from: $PRETRAINED_PATH"
 echo "Output: $FINETUNE_OUTPUT"
 echo "============================================================"
 
-CUDA_VISIBLE_DEVICES=0 python main_finetune_qwen.py \
+torchrun --nproc_per_node=$NUM_GPUS --master_port=$MASTER_PORT \
+    main_finetune_qwen.py \
     --load_pretrained \
     --pretrained_model_path $PRETRAINED_PATH \
     --dataset $DATASET \
@@ -72,6 +80,7 @@ CUDA_VISIBLE_DEVICES=0 python main_finetune_qwen.py \
     --blr 1e-3 \
     --warmup_epochs 10 \
     --gradient_checkpointing \
+    --dist_eval \
     --output_dir $FINETUNE_OUTPUT \
     --log_dir $FINETUNE_OUTPUT \
     --seed $SEED
@@ -109,7 +118,8 @@ if [ ! -f "$FINETUNE_CHECKPOINT" ]; then
     fi
 fi
 
-CUDA_VISIBLE_DEVICES=0 python main_linprobe_qwen.py \
+torchrun --nproc_per_node=$NUM_GPUS --master_port=$MASTER_PORT \
+    main_linprobe_qwen.py \
     --finetune_checkpoint $FINETUNE_CHECKPOINT \
     --pretrained_model_path $PRETRAINED_PATH \
     --dataset $DATASET \
@@ -123,6 +133,7 @@ CUDA_VISIBLE_DEVICES=0 python main_linprobe_qwen.py \
     --weight_decay 0 \
     --warmup_epochs 10 \
     --linear_probe \
+    --dist_eval \
     --output_dir $LINPROBE_OUTPUT \
     --log_dir $LINPROBE_OUTPUT \
     --seed $SEED

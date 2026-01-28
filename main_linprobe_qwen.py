@@ -58,6 +58,14 @@ def get_args_parser():
     parser.add_argument('--warmup_epochs', type=int, default=10,
                         help='Epochs to warmup LR')
 
+    # DeepSpeed parameters
+    parser.add_argument('--deepspeed', action='store_true',
+                        help='Use DeepSpeed for distributed training')
+    parser.add_argument('--deepspeed_config', type=str, default='deepspeed_configs/zero2_config.json',
+                        help='Path to DeepSpeed configuration file')
+    parser.add_argument('--deepspeed_checkpoint', action='store_true',
+                        help='Load from DeepSpeed checkpoint format (vs standard PyTorch)')
+
     # Dataset parameters
     parser.add_argument('--dataset', type=str, default='cifar10',
                         choices=['cifar10', 'cifar100', 'imagenet', 'tiny-imagenet'],
@@ -196,24 +204,55 @@ def main(args):
     )
 
     # Load fine-tuned checkpoint
-    checkpoint = torch.load(args.finetune_checkpoint, map_location='cpu')
+    if args.deepspeed_checkpoint:
+        # DeepSpeed checkpoint: Extract from directory structure
+        print(f"Loading DeepSpeed checkpoint from: {args.finetune_checkpoint}")
 
-    if 'model' in checkpoint:
-        state_dict = checkpoint['model']
+        # Find model state file in DeepSpeed checkpoint directory
+        checkpoint_dir = Path(args.finetune_checkpoint)
+        model_state_files = list(checkpoint_dir.glob("mp_rank_*_model_states.pt"))
+
+        if not model_state_files:
+            raise FileNotFoundError(
+                f"No DeepSpeed model state files found in {checkpoint_dir}. "
+                f"Expected files like 'mp_rank_00_model_states.pt'"
+            )
+
+        # Load model states (DeepSpeed stores model under 'module' key)
+        print(f"Loading model state from: {model_state_files[0].name}")
+        ds_checkpoint = torch.load(model_state_files[0], map_location='cpu')
+
+        if 'module' in ds_checkpoint:
+            state_dict = ds_checkpoint['module']
+        else:
+            state_dict = ds_checkpoint
+
+        # Load the full state dict from fine-tuning
+        model.load_state_dict(state_dict, strict=False)
+        print(f"Loaded fine-tuned weights from DeepSpeed checkpoint")
+    else:
+        # Standard PyTorch checkpoint
+        checkpoint = torch.load(args.finetune_checkpoint, map_location='cpu')
+
+        if 'model' in checkpoint:
+            state_dict = checkpoint['model']
+        else:
+            state_dict = checkpoint
+
         # Load the full state dict from fine-tuning
         model.load_state_dict(state_dict, strict=False)
         print(f"Loaded fine-tuned weights from {args.finetune_checkpoint}")
 
-        # Re-freeze backbone (in case it wasn't frozen)
-        for param in model.qwen.parameters():
-            param.requires_grad = False
+    # Re-freeze backbone (in case it wasn't frozen)
+    for param in model.qwen.parameters():
+        param.requires_grad = False
 
-        # Re-initialize classifier for fresh linear probing
-        model._init_weights()
-        print("Re-initialized classifier for linear probing")
+    # Re-initialize classifier for fresh linear probing
+    model._init_weights()
+    print("Re-initialized classifier for linear probing")
 
-    model.to(device)
-
+    # Note: Don't move model to device yet - will be done in DDP/DeepSpeed initialization
+    # Moving to device multiple times can cause OOM issues with large models
     model_without_ddp = model
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
@@ -230,17 +269,89 @@ def main(args):
     print("accumulate grad iterations: %d" % args.accum_iter)
     print("effective batch size: %d" % eff_batch_size)
 
-    if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+    # Initialize DeepSpeed or standard DDP
+    if args.deepspeed:
+        import deepspeed
+        import json
+
+        print(f"Initializing DeepSpeed with config: {args.deepspeed_config}")
+
+        # Load DeepSpeed config
+        with open(args.deepspeed_config, 'r') as f:
+            ds_config = json.load(f)
+
+        # Update DeepSpeed config with runtime parameters
+        ds_config['train_batch_size'] = eff_batch_size
+        ds_config['train_micro_batch_size_per_gpu'] = args.batch_size
+        ds_config['gradient_accumulation_steps'] = args.accum_iter
+
+        # For linear probing, we use LARS optimizer (not AdamW)
+        # DeepSpeed allows custom optimizers via manual initialization
+        optimizer = LARS(
+            model.parameters(),
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+            momentum=0.9
+        )
+
+        # Create scheduler
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=args.epochs
+        )
+
+        # Initialize DeepSpeed engine
+        model_engine, optimizer, _, lr_scheduler = deepspeed.initialize(
+            model=model,
+            optimizer=optimizer,
+            lr_scheduler=scheduler,
+            config=ds_config
+        )
+
+        model = model_engine
+        scheduler = lr_scheduler
         model_without_ddp = model.module
+        loss_scaler = None  # DeepSpeed handles gradient scaling
 
-    # Use LARS optimizer for linear probing (following MoCo v1/v3)
-    optimizer = LARS(model_without_ddp.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    print(optimizer)
+        print("DeepSpeed initialization complete (Linear Probe mode)")
+        print(f"  - ZeRO stage: {ds_config['zero_optimization']['stage']}")
+        print(f"  - Trainable params: patch_embed + classifier only")
+        print(f"  - Optimizer: LARS (MoCo v1 protocol)")
 
-    # Use NoOpScaler for bfloat16 (GradScaler doesn't support bfloat16)
-    loss_scaler = NoOpScaler()
-    print("Using NoOpScaler for bfloat16 training (no gradient scaling)")
+    else:
+        # Standard PyTorch DDP
+        model.to(device)
+
+        if args.distributed:
+            model = torch.nn.parallel.DistributedDataParallel(
+                model, device_ids=[args.gpu], find_unused_parameters=True
+            )
+            model_without_ddp = model.module
+
+        # LARS optimizer for linear probing (following MoCo v1/v3)
+        optimizer = LARS(
+            model_without_ddp.parameters(),
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+            momentum=0.9
+        )
+        print(f"Optimizer: LARS (lr={args.lr}, weight_decay={args.weight_decay}, momentum=0.9)")
+
+        # CosineAnnealingLR scheduler (same as DeepSpeed for consistency)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=args.epochs
+        )
+        print(f"Scheduler: CosineAnnealingLR (T_max={args.epochs})")
+
+        # Use NoOpScaler for bfloat16 (GradScaler doesn't support bfloat16)
+        loss_scaler = NoOpScaler()
+        print("Using NoOpScaler for bfloat16 training (no gradient scaling)")
+
+        print("Standard DDP initialization complete")
+        print(f"  - Model wrapped in DistributedDataParallel")
+        print(f"  - Optimizer: LARS (MoCo v1 protocol)")
+        print(f"  - Scheduler: CosineAnnealingLR")
 
     criterion = torch.nn.CrossEntropyLoss()
 
@@ -269,10 +380,22 @@ def main(args):
             args=args
         )
 
+        # Step scheduler (DeepSpeed manages its own scheduler internally)
+        if not args.deepspeed and scheduler is not None:
+            scheduler.step()
+
         if args.output_dir:
-            misc.save_model(
-                args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
-                loss_scaler=loss_scaler, epoch=epoch)
+            if args.deepspeed:
+                # DeepSpeed checkpoint saving
+                client_state = {'epoch': epoch}
+                model.save_checkpoint(args.output_dir, tag=f'checkpoint-{epoch}', client_state=client_state)
+                if misc.is_main_process():
+                    print(f"Saved DeepSpeed checkpoint: {args.output_dir}/checkpoint-{epoch}")
+            else:
+                # Standard PyTorch checkpoint saving
+                misc.save_model(
+                    args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
+                    loss_scaler=loss_scaler, epoch=epoch)
 
         test_stats = evaluate(data_loader_val, model, device)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")

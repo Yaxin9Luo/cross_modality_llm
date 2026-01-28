@@ -213,6 +213,47 @@ def save_on_master(*args, **kwargs):
 
 
 def init_distributed_mode(args):
+    # Check if DeepSpeed is enabled
+    if hasattr(args, 'deepspeed') and args.deepspeed:
+        # DeepSpeed requires distributed backend to be initialized
+        # Set up environment variables and initialize process group
+        if 'LOCAL_RANK' in os.environ:
+            args.local_rank = int(os.environ['LOCAL_RANK'])
+            args.rank = int(os.environ.get('RANK', args.local_rank))
+            args.world_size = int(os.environ.get('WORLD_SIZE', 1))
+            args.gpu = args.local_rank
+        else:
+            print('DeepSpeed enabled but LOCAL_RANK not found in environment')
+            args.local_rank = -1
+            args.rank = 0
+            args.world_size = 1
+            args.gpu = 0
+
+        args.distributed = args.world_size > 1
+
+        if args.distributed:
+            torch.cuda.set_device(args.gpu)
+            args.dist_backend = 'nccl'
+
+            # Initialize process group for DeepSpeed
+            # DeepSpeed expects this to be already initialized
+            if not torch.distributed.is_initialized():
+                print('| DeepSpeed distributed init (rank {}): gpu {}'.format(
+                    args.rank, args.gpu), flush=True)
+                torch.distributed.init_process_group(
+                    backend=args.dist_backend,
+                    init_method='env://',
+                    world_size=args.world_size,
+                    rank=args.rank
+                )
+                torch.distributed.barrier()
+
+            setup_for_distributed(args.rank == 0)
+        else:
+            setup_for_distributed(is_master=True)
+        return
+
+    # Standard PyTorch DDP initialization
     if args.dist_on_itp:
         args.rank = int(os.environ['OMPI_COMM_WORLD_RANK'])
         args.world_size = int(os.environ['OMPI_COMM_WORLD_SIZE'])

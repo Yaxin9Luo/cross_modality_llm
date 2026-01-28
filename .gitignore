@@ -38,3 +38,4 @@ Thumbs.db
 *.imagenet_cache/*
 ckpts/
 Qwen3-8B/
+Qwen3-14B/

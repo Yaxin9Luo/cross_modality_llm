@@ -7,6 +7,8 @@
 #   Stage 2: Linear probing on the trained checkpoint
 #
 # All experiments use seed=42 for reproducibility
+#
+# Distributed Training: Uses 2 GPUs via torchrun
 # ============================================================
 
 set -e  # Exit on error
@@ -23,12 +25,17 @@ ACCUM_ITER=2
 EPOCHS_FINETUNE=100
 EPOCHS_LINPROBE=100
 
+# Distributed training configuration
+NUM_GPUS="${NUM_GPUS:-2}"
+MASTER_PORT="${MASTER_PORT:-29501}"
+
 echo "============================================================"
 echo "Qwen3-8B Random Initialization Experiment"
 echo "Seed: $SEED"
 echo "Dataset: $DATASET (${NB_CLASSES} classes)"
 echo "Data Path: $DATA_PATH"
 echo "Output Base: $OUTPUT_BASE"
+echo "Distributed Training: ${NUM_GPUS} GPUs (Master Port: $MASTER_PORT)"
 echo "============================================================"
 
 # ============================================================
@@ -44,7 +51,8 @@ echo "Stage 1: Training randomly initialized Qwen3-8B on CIFAR-10"
 echo "Output: $FINETUNE_OUTPUT"
 echo "============================================================"
 
-CUDA_VISIBLE_DEVICES=1 python main_finetune_qwen.py \
+torchrun --nproc_per_node=$NUM_GPUS --master_port=$MASTER_PORT \
+    main_finetune_qwen.py \
     --random_init \
     --pretrained_model_path $PRETRAINED_PATH \
     --dataset $DATASET \
@@ -60,6 +68,7 @@ CUDA_VISIBLE_DEVICES=1 python main_finetune_qwen.py \
     --blr 1e-3 \
     --warmup_epochs 10 \
     --gradient_checkpointing \
+    --dist_eval \
     --output_dir $FINETUNE_OUTPUT \
     --log_dir $FINETUNE_OUTPUT \
     --seed $SEED
@@ -97,7 +106,8 @@ if [ ! -f "$FINETUNE_CHECKPOINT" ]; then
     fi
 fi
 
-CUDA_VISIBLE_DEVICES=1 python main_linprobe_qwen.py \
+torchrun --nproc_per_node=$NUM_GPUS --master_port=$MASTER_PORT \
+    main_linprobe_qwen.py \
     --finetune_checkpoint $FINETUNE_CHECKPOINT \
     --pretrained_model_path $PRETRAINED_PATH \
     --dataset $DATASET \
@@ -111,6 +121,7 @@ CUDA_VISIBLE_DEVICES=1 python main_linprobe_qwen.py \
     --weight_decay 0 \
     --warmup_epochs 10 \
     --linear_probe \
+    --dist_eval \
     --output_dir $LINPROBE_OUTPUT \
     --log_dir $LINPROBE_OUTPUT \
     --seed $SEED

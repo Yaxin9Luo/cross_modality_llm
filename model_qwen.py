@@ -151,8 +151,9 @@ class MAE_Qwen3_Classifier(nn.Module):
         Returns:
             logits: Classification logits [B, num_classes]
         """
-        # Image → Patch embeddings (convert to bfloat16)
-        x = self.patch_embed(x).to(torch.bfloat16)  # [B, 196, 4096] for 224x224 images
+        # Image → Patch embeddings (convert input to bfloat16 for DeepSpeed compatibility)
+        x = x.to(torch.bfloat16)  # Convert input before patch_embed
+        x = self.patch_embed(x)  # [B, 196, 4096] for 224x224 images
 
         # Pass through Qwen3 backbone
         # Note: Qwen3 uses inputs_embeds to bypass tokenization
@@ -178,6 +179,7 @@ class MAE_Qwen3_Classifier(nn.Module):
             features: Last hidden states [B, seq_len, hidden_size]
         """
         with torch.no_grad():
+            x = x.to(torch.bfloat16)  # Convert input before patch_embed
             x = self.patch_embed(x)
             qwen_output = self.qwen(inputs_embeds=x).last_hidden_state
         return qwen_output
