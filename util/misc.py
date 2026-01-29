@@ -379,6 +379,26 @@ def save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler):
         model.save_checkpoint(save_dir=args.output_dir, tag="checkpoint-%s" % epoch_name, client_state=client_state)
 
 
+def save_model_best(args, epoch, model, model_without_ddp, optimizer, loss_scaler, best_acc1):
+    """Save the best checkpoint, overwriting any previous best."""
+    output_dir = Path(args.output_dir)
+    checkpoint_path = output_dir / 'checkpoint-best.pth'
+
+    to_save = {
+        'model': model_without_ddp.state_dict(),
+        'optimizer': optimizer.state_dict(),
+        'epoch': epoch,
+        'best_acc1': best_acc1,
+        'args': args,
+    }
+    if loss_scaler is not None:
+        to_save['scaler'] = loss_scaler.state_dict()
+
+    save_on_master(to_save, checkpoint_path)
+    if is_main_process():
+        print(f"New best! Saved checkpoint: {checkpoint_path} (acc: {best_acc1:.2f}%)")
+
+
 def load_model(args, model_without_ddp, optimizer, loss_scaler):
     if args.resume:
         if args.resume.startswith('https'):

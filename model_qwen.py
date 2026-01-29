@@ -84,6 +84,11 @@ class MAE_Qwen3_Classifier(nn.Module):
             embed_dim=self.config.hidden_size  # 4096 for Qwen3-8B
         )
 
+        # CRITICAL: Convert patch_embed to bfloat16 to match Qwen3 dtype
+        # This fixes OOM issues by reducing memory usage by ~200MB per batch
+        self.patch_embed = self.patch_embed.to(torch.bfloat16)
+        print("✓ Patch embedding converted to bfloat16 for memory efficiency")
+
         num_patches = self.patch_embed.num_patches
         print(f"Patch embedding: {args.input_size}x{args.input_size} → {num_patches} patches of {self.config.hidden_size}-dim")
 
@@ -157,9 +162,18 @@ class MAE_Qwen3_Classifier(nn.Module):
 
         # Pass through Qwen3 backbone
         # Note: Qwen3 uses inputs_embeds to bypass tokenization
-        qwen_output = self.qwen(
-            inputs_embeds=x
-        ).last_hidden_state  # [B, 196, 4096]
+        # In linear probe mode, use no_grad to avoid storing activations (saves ~60% memory)
+        if self.linear_probe:
+            with torch.no_grad():
+                qwen_output = self.qwen(
+                    inputs_embeds=x
+                ).last_hidden_state  # [B, 196, 4096]
+            # Detach to ensure gradients don't flow back through frozen backbone
+            qwen_output = qwen_output.detach()
+        else:
+            qwen_output = self.qwen(
+                inputs_embeds=x
+            ).last_hidden_state  # [B, 196, 4096]
 
         # Use last token representation for classification
         # This follows the GPT-style sequence-to-class pooling

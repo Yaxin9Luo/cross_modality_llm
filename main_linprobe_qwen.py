@@ -384,22 +384,31 @@ def main(args):
         if not args.deepspeed and scheduler is not None:
             scheduler.step()
 
-        if args.output_dir:
-            if args.deepspeed:
-                # DeepSpeed checkpoint saving
-                client_state = {'epoch': epoch}
-                model.save_checkpoint(args.output_dir, tag=f'checkpoint-{epoch}', client_state=client_state)
-                if misc.is_main_process():
-                    print(f"Saved DeepSpeed checkpoint: {args.output_dir}/checkpoint-{epoch}")
-            else:
-                # Standard PyTorch checkpoint saving
-                misc.save_model(
-                    args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
-                    loss_scaler=loss_scaler, epoch=epoch)
-
+        # Evaluate first, then save only if best accuracy
         test_stats = evaluate(data_loader_val, model, device)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
-        max_accuracy = max(max_accuracy, test_stats["acc1"])
+
+        # Only save checkpoint if this is the best accuracy so far
+        if test_stats["acc1"] > max_accuracy:
+            max_accuracy = test_stats["acc1"]
+            if args.output_dir:
+                if args.deepspeed:
+                    # DeepSpeed: remove old best checkpoint first, then save new one
+                    import shutil
+                    best_ckpt_path = os.path.join(args.output_dir, 'checkpoint-best')
+                    if os.path.exists(best_ckpt_path):
+                        shutil.rmtree(best_ckpt_path)
+                    client_state = {'epoch': epoch, 'best_acc1': max_accuracy}
+                    model.save_checkpoint(args.output_dir, tag='checkpoint-best', client_state=client_state)
+                    if misc.is_main_process():
+                        print(f"New best! Saved DeepSpeed checkpoint: {args.output_dir}/checkpoint-best (acc: {max_accuracy:.2f}%)")
+                else:
+                    # Standard PyTorch: save as checkpoint-best.pth
+                    misc.save_model_best(
+                        args=args, model=model, model_without_ddp=model_without_ddp,
+                        optimizer=optimizer, loss_scaler=loss_scaler, epoch=epoch,
+                        best_acc1=max_accuracy)
+
         print(f'Max accuracy: {max_accuracy:.2f}%')
 
         if log_writer is not None:

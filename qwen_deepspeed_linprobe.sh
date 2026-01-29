@@ -22,7 +22,7 @@ DATA_PATH="${DATA_PATH:-./data}"
 OUTPUT_BASE="./results/qwen_deepspeed"
 DATASET="cifar100"
 NB_CLASSES=100
-BATCH_SIZE=64  # 2x larger than standard DDP (128)
+BATCH_SIZE="${BATCH_SIZE:-256}"  # Can now use larger batch after bfloat16 fix
 ACCUM_ITER=1
 EPOCHS=100
 
